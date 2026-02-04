@@ -70,6 +70,8 @@ curl "http://127.0.0.1:8765/api/funding?symbol=BTCUSDT"
    ```
 3. Исполняемый файл: `dist\FundingRate.exe`. Его можно копировать и запускать без установленного Python. Папка `data` (кэш Parquet) и файл `window_state.json` (размер/позиция окна и последняя пара) создаются рядом с exe при необходимости.
 
+Папка **`hooks`** содержит хуки PyInstaller (`hook-uvicorn.py`, `hook-fastapi.py`): они подтягивают в exe все модули и зависимости uvicorn и fastapi. Без этих хуков собранный exe может падать с ошибкой отсутствующих модулей.
+
 ## Структура проекта
 
 ```
@@ -81,6 +83,9 @@ funding-parser/
 ├── requirements.txt
 ├── FundingRate.spec     # Конфигурация PyInstaller
 ├── build.bat            # Сборка exe
+├── hooks/               # Хуки PyInstaller для корректной упаковки uvicorn и fastapi в exe
+│   ├── hook-uvicorn.py
+│   └── hook-fastapi.py
 ├── gui/
 │   └── window.py       # Окно Tkinter: пара, биржи, история, сохранение состояния
 ├── routers/
