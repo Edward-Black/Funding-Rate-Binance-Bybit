@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from datetime import datetime, timezone
 from tkinter import Tk, ttk, StringVar, Label, Entry, Frame, Button, Listbox, Scrollbar
 from typing import Any
@@ -179,6 +180,8 @@ class FundingWindow:
         self._exchange_labels: dict[str, dict[str, Any]] = {}  # name -> {rate, ttn, interval, ...}
         self._history_visible: dict[str, bool] = {}
         self._history_loaded_symbol: dict[str, str] = {}
+        self._last_zero_refresh_at: float = 0.0
+        self._rapid_poll_after_zero_id: str | None = None
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._start_timers()
@@ -377,6 +380,10 @@ class FundingWindow:
             self._resize_window_by(block_height)
             btn.config(text="Funding Rate History ▼")
             self._history_visible[name] = True
+            try:
+                labels["history_listbox"].yview_moveto(0)
+            except Exception:
+                pass
             symbol = (self.symbol_var.get() or "").upper().strip()
             if symbol and self._history_loaded_symbol.get(name) != symbol:
                 self._load_history_for_exchange(name)
@@ -394,7 +401,7 @@ class FundingWindow:
         threading.Thread(target=do, daemon=True).start()
 
     def _fill_history_listbox(self, name: str, symbol: str, data: dict[str, Any]) -> None:
-        """Заполнить Listbox истории для биржи (вызывать из main thread)."""
+        """Заполнить Listbox истории для биржи (вызывать из main thread). Позицию прокрутки сохраняем."""
         current = (self.symbol_var.get() or "").upper().strip()
         if current != symbol:
             return
@@ -402,6 +409,10 @@ class FundingWindow:
         if not labels:
             return
         listbox = labels["history_listbox"]
+        try:
+            scroll_top = listbox.yview()[0]
+        except Exception:
+            scroll_top = 0.0
         listbox.delete(0, "end")
         if data.get("error"):
             listbox.insert("end", f"Error: {data['error']}")
@@ -415,6 +426,10 @@ class FundingWindow:
             rate = item.get("fundingRate") or ""
             listbox.insert("end", format_history_line(ts, rate))
         self._history_loaded_symbol[name] = symbol
+        try:
+            listbox.yview_moveto(min(scroll_top, 1.0))
+        except Exception:
+            pass
 
     def _normalize_symbol(self, event=None) -> None:
         s = "".join(c for c in self.symbol_var.get().upper() if c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-")
@@ -466,21 +481,47 @@ class FundingWindow:
                     labels["rate"].config(fg="black")
                 labels["ttn"].config(text=ttn)
                 labels["interval"].config(text=interval)
+        if any(self.next_funding_ms.get(n) and not self._is_past_funding_time(self.next_funding_ms[n]) for n in ("binance", "bybit", "okx")):
+            self._last_zero_refresh_at = 0.0
         for name in ("binance", "bybit", "okx"):
             if self._history_visible.get(name):
                 self._history_loaded_symbol[name] = ""
                 self._load_history_for_exchange(name)
 
+    def _is_past_funding_time(self, next_ms: int) -> bool:
+        """Проверить, прошло ли уже время фандинга (next_ms в прошлом)."""
+        if not next_ms:
+            return False
+        try:
+            next_utc = datetime.fromtimestamp(next_ms / 1000.0, tz=timezone.utc)
+            now_utc = datetime.now(timezone.utc)
+            return (next_utc - now_utc).total_seconds() <= 0
+        except Exception:
+            return False
+
     def _tick_countdown(self) -> None:
-        """Update Time to Next every second."""
+        """Update Time to Next every second. При достижении нуля — немедленный refresh и повтор через 5 сек."""
+        any_at_zero = False
         for name in ("binance", "bybit", "okx"):
             next_ms = self.next_funding_ms.get(name, 0)
             if not next_ms:
                 continue
+            if self._is_past_funding_time(next_ms):
+                any_at_zero = True
             labels = self._exchange_labels.get(name)
             if labels:
                 labels["ttn"].config(text=format_time_to_next(next_ms))
+        if any_at_zero and (time.time() - self._last_zero_refresh_at) >= 5:
+            self._last_zero_refresh_at = time.time()
+            self._refresh()
+            if self._rapid_poll_after_zero_id is None:
+                self._rapid_poll_after_zero_id = self.root.after(5000, self._rapid_poll_after_zero)
         self.root.after(1000, self._tick_countdown)
+
+    def _rapid_poll_after_zero(self) -> None:
+        """Повторный запрос через 5 сек после нуля (биржи обновляют nextFundingTime с задержкой)."""
+        self._rapid_poll_after_zero_id = None
+        self._refresh()
 
     def _api_poll(self) -> None:
         """Refresh data from API every 15 seconds."""
